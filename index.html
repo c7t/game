@@ -12,6 +12,8 @@ body {
   align-items:center; justify-content:center;
   height:100vh; overflow:hidden;
   font-family:'Courier New', monospace;
+  touch-action:none;
+  user-select:none; -webkit-user-select:none;
 }
 canvas { display:block; cursor:pointer; touch-action:none; image-rendering:pixelated }
 #tip { margin-top:10px; color:rgba(255,255,255,0.22); font:12px 'Courier New',monospace; letter-spacing:2px; text-transform:uppercase }
@@ -31,12 +33,21 @@ canvas { display:block; cursor:pointer; touch-action:none; image-rendering:pixel
 // ═══════════════════════════════════════════════════════════
 
 const cv = document.getElementById('c'), cx = cv.getContext('2d')
-const W = 800, H = 440
-cv.width = W; cv.height = H
-;(function scale(){
-  const s = Math.min(window.innerWidth/W, (window.innerHeight-40)/H)
-  cv.style.width=(W*s)+'px'; cv.style.height=(H*s)+'px'
-})()
+const W = 800, H = 440                // logical game space — physics lives here
+const PIXEL_SCALE = 3                 // canvas is 3× lower-res → chunky pixels
+const CW = Math.round(W/PIXEL_SCALE)  // 267 canvas px wide
+const CH = Math.round(H/PIXEL_SCALE)  // 147 canvas px tall
+cv.width = CW; cv.height = CH
+
+function scaleCanvas() {
+  const s = Math.min(window.innerWidth/CW, (window.innerHeight-40)/CH)
+  cv.style.width  = (CW*s)+'px'
+  cv.style.height = (CH*s)+'px'
+}
+scaleCanvas()
+window.addEventListener('resize', () => { scaleCanvas(); setTimeout(scaleCanvas, 150) })
+// Block long-press context menu on mobile
+window.addEventListener('contextmenu', e => e.preventDefault())
 
 // ── Physics ─────────────────────────────────────────────────
 const SPD  = 4        // px/frame auto-run
@@ -133,6 +144,9 @@ let lastGroundY=0   // world-Y of last surface the player stood on
 function init() {
   plats=[]; signs=[]; zones=[]; particles=[]
   tick=0; score=0; gx=0; camX=0; lastType='flat'
+  // ?score=N or ?diff=N lets you start at a higher difficulty for tuning
+  const urlScore = parseInt(new URLSearchParams(location.search).get('score') ?? new URLSearchParams(location.search).get('diff') ?? '0')
+  if (urlScore > 0) score = urlScore
   Object.keys(typeClears).forEach(k => typeClears[k]=0)
   gy = 260   // starting world-Y for ground
 
@@ -278,7 +292,7 @@ function act() {
 document.addEventListener('keydown', e=>{
   if (['Space','ArrowUp','KeyW'].includes(e.code)) { e.preventDefault(); act() }
 })
-cv.addEventListener('pointerdown', e=>{ e.preventDefault(); act() })
+window.addEventListener('pointerdown', e=>{ e.preventDefault(); act() })
 
 // ── Particles ─────────────────────────────────────────────────
 function spawnJumpPfx() {
@@ -371,17 +385,7 @@ function drawBg() {
   }
 }
 
-function drawZones() {
-  for (const z of zones) {
-    const sx=z.x-camX|0, sy=z.y-camY|0
-    if (sx+z.w<0||sx>W||sy>H||sy+z.h<0) continue
-    const c=COL[z.t], dy=Math.min(z.h,120)
-    const g=cx.createLinearGradient(0,sy,0,sy+dy)
-    g.addColorStop(0,c.dim.replace('0.12','0.28'))
-    g.addColorStop(1,c.dim.replace('0.12','0.02'))
-    cx.fillStyle=g; cx.fillRect(sx,sy,z.w,z.h)
-  }
-}
+function drawZones() {}  // removed — zones kept in world state for gen() logic, not drawn
 
 function drawPlats() {
   const cf = getDiff().colorFade   // 0 = vivid type colors, 1 = uniform neutral
@@ -396,9 +400,9 @@ function drawPlats() {
     cx.fillStyle=c.b; cx.fillRect(sx,sy,p.w,PTH)
     cx.fillStyle=c.s; cx.fillRect(sx,sy,p.w,5)
     if (cf > 0) {
-      // Neutral steel: fades type color away
-      cx.fillStyle=`rgba(22,34,58,${cf*0.92})`; cx.fillRect(sx,sy,p.w,PTH)
-      cx.fillStyle=`rgba(34,52,88,${cf*0.92})`; cx.fillRect(sx,sy,p.w,5)
+      // Neutral steel — bright enough to see against black sky
+      cx.fillStyle=`rgba(100,125,175,${cf*0.90})`; cx.fillRect(sx,sy,p.w,PTH)
+      cx.fillStyle=`rgba(145,170,225,${cf*0.90})`; cx.fillRect(sx,sy,p.w,5)
     }
 
     cx.fillStyle='rgba(0,0,0,0.22)'; cx.fillRect(sx,sy+PTH/2|0,p.w,1)
@@ -416,17 +420,16 @@ function drawPlats() {
 }
 
 function drawSigns() {
-  cx.font='bold 11px "Courier New",monospace'
+  cx.font='bold 33px "Courier New",monospace'
   for (const s of signs) {
-    if (!showLabel(s.t)) continue                              // hidden once cleared twice
+    if (!showLabel(s.t)) continue
     const sx=s.x-camX|0, sy=s.y-camY|0
-    if (sx<-80||sx>W+80||sy<-30||sy>H+10) continue
+    if (sx<-80||sx>W+80||sy<-40||sy>H+20) continue
     const c=COL[s.t]
-    // Fade label alpha with color fade (labels become less readable as world decolors)
     const a = 1 - getDiff().colorFade * 0.5
-    const tw=cx.measureText(s.s).width+10
+    const tw=cx.measureText(s.s).width+12
     cx.globalAlpha=a
-    cx.fillStyle='rgba(0,0,0,0.55)'; cx.fillRect(sx-2,sy-13,tw,16)
+    cx.fillStyle='rgba(0,0,0,0.60)'; cx.fillRect(sx-4,sy-27,tw,32)
     cx.fillStyle=c.t; cx.fillText(s.s,sx+3,sy)
     cx.globalAlpha=1
   }
@@ -456,108 +459,87 @@ function drawPlayer() {
   } else {
     cx.fillRect(sx+3,sy+PLH,8,5); cx.fillRect(sx+PLW-11,sy+PLH,8,5)
   }
-  cx.strokeStyle='rgba(0,0,0,0.5)'; cx.lineWidth=1
-  cx.strokeRect(sx+.5,sy+.5,PLW-1,PLH-1)
+  cx.strokeStyle='rgba(0,0,0,0.5)'; cx.lineWidth=3
+  cx.strokeRect(sx+1,sy+1,PLW-2,PLH-2)
 }
 
-// ── Camera debug strip ────────────────────────────────────────
-function drawCamStrip() {
-  if (mode!=='play') return
-  // Thin vertical strip on right edge showing dead zone + player position
-  const ix=W-18, iy=16, iw=10, ih=H-32
-  cx.fillStyle='rgba(0,0,0,0.50)'; cx.fillRect(ix-2,iy-2,iw+4,ih+4)
-  // dead zone band
-  const dzT=DZ_TOP/H*ih, dzB=DZ_BOT_IDLE/H*ih, dzBf=DZ_BOT_FALL/H*ih
-  cx.fillStyle='rgba(80,255,80,0.10)';  cx.fillRect(ix,iy+dzT,iw,dzB-dzT)
-  cx.fillStyle='rgba(255,160,40,0.12)'; cx.fillRect(ix,iy+dzB,iw,dzBf-dzB)  // tighter fall zone
-  // player indicator
-  const cSY=(pl.y+PLH/2)-camY
-  const py=iy+Math.min(Math.max(cSY/H,0),1)*ih
-  cx.fillStyle=pl.on?'#80ff60':(coyote>0?'#ffc040':'#ff5050')
-  cx.fillRect(ix,py-2,iw,4)
-  // velocity arrow
-  if (Math.abs(camYVel)>0.3) {
-    cx.fillStyle=camYVel>0?'rgba(255,100,100,0.6)':'rgba(100,200,255,0.6)'
-    const arLen=Math.min(Math.abs(camYVel)*3,12)
-    cx.fillRect(ix+2,py+(camYVel>0?2:(-2-arLen)),6,arLen)
-  }
-}
+// (camera debug strip removed)
 
 function drawHUD() {
   if (mode!=='play') return
-  const tName=NAME[lastType]||''
-  if (tName&&tName!=='FLAT') {
-    const c=COL[lastType]
-    cx.font='bold 10px "Courier New",monospace'
-    const tw=cx.measureText('◉ '+tName).width+14
-    cx.fillStyle='rgba(0,0,0,0.55)'; cx.fillRect(12,H-28,tw,18)
-    cx.fillStyle=c.t; cx.fillText('◉ '+tName,18,H-14)
-  }
-  cx.font='bold 15px "Courier New",monospace'
-  cx.fillStyle='rgba(255,255,255,0.88)'; cx.fillText('DIST  '+String(score).padStart(5,'0'),14,26)
-  if (best>0) { cx.fillStyle='#e8c030'; cx.fillText('BEST  '+String(best).padStart(5,'0'),14,46) }
 
-  // Difficulty phase strip — a small heat bar top-right
-  // Shows speed visually: filled = fast, color shifts warm with danger
-  const d = getDiff()
-  const spd_t = (d.speed - 4) / 3.5        // 0..1 across speed range
-  const barW = 60, barH = 6
-  const bx = W - barW - 14, by = 14
-  cx.fillStyle='rgba(0,0,0,0.45)'; cx.fillRect(bx-2, by-2, barW+4, barH+4)
-  // Gradient: green (slow) → yellow → red (fast)
+  // Score / best — 3x font size
+  cx.font='bold 22px "Courier New",monospace'
+  cx.fillStyle='rgba(255,255,255,0.90)'; cx.fillText('DIST '+String(score).padStart(5,'0'),14,28)
+  if (best>0) { cx.fillStyle='#e8c030'; cx.fillText('BEST '+String(best).padStart(5,'0'),14,54) }
+
+  // Speed heat bar — top right
+  const d=getDiff()
+  const spd_t=(d.speed-4)/3.5
+  const barW=150, barH=16, bx=W-barW-20, by=18
+  cx.fillStyle='rgba(0,0,0,0.50)'; cx.fillRect(bx-3,by-3,barW+6,barH+6)
   const bg=cx.createLinearGradient(bx,0,bx+barW,0)
   bg.addColorStop(0,'#30c040'); bg.addColorStop(0.5,'#d0c020'); bg.addColorStop(1,'#e03030')
-  cx.fillStyle=bg; cx.fillRect(bx, by, barW*spd_t, barH)
-  cx.strokeStyle='rgba(255,255,255,0.18)'; cx.lineWidth=1
-  cx.strokeRect(bx-0.5, by-0.5, barW+1, barH+1)
-
-  drawCamStrip()
+  cx.fillStyle=bg; cx.fillRect(bx,by,barW*spd_t,barH)
+  cx.strokeStyle='rgba(255,255,255,0.20)'; cx.lineWidth=3
+  cx.strokeRect(bx,by,barW,barH)
 }
 
 function overlay(rows) {
-  cx.fillStyle='rgba(3,3,14,0.88)'; cx.fillRect(0,0,W,H)
-  cx.strokeStyle='rgba(255,255,255,0.05)'; cx.lineWidth=1
-  for (let y=0;y<H;y+=18){ cx.beginPath();cx.moveTo(0,y);cx.lineTo(W,y);cx.stroke() }
-  let y=H/2-rows.reduce((a,r)=>a+(r.gap||36),0)/2
+  cx.fillStyle='rgba(3,3,14,0.90)'; cx.fillRect(0,0,W,H)
+  let y=H/2-rows.reduce((a,r)=>a+(r.gap||108),0)/2
   cx.textAlign='center'
   for (const r of rows) {
-    cx.font=r.font||'16px "Courier New",monospace'; cx.fillStyle=r.c||'#fff'
+    cx.font=r.font||'48px "Courier New",monospace'; cx.fillStyle=r.c||'#fff'
     if(r.pulse) cx.globalAlpha=.6+.4*Math.sin(Date.now()/380)
-    cx.fillText(r.text,W/2,y); cx.globalAlpha=1; y+=r.gap||36
+    cx.fillText(r.text,W/2,y); cx.globalAlpha=1; y+=r.gap||108
   }
   cx.textAlign='left'
 }
 
 function drawTitle() {
   overlay([
-    {text:'▣ ONE BUTTON PLATFORMER',font:'bold 30px "Courier New",monospace',c:'#ff6060',gap:50},
-    {text:'auto-run  ·  one button to jump',font:'14px "Courier New",monospace',c:'#6688bb',gap:36},
-    {text:'▲ step up   ▶▶ gap   ▼ step down   ⬇ fall   — flat',font:'bold 12px "Courier New",monospace',c:'#8899aa',gap:48},
-    {text:'SPACE  ·  CLICK  ·  TAP  to start',font:'bold 18px "Courier New",monospace',c:'#fff',pulse:true},
+    {text:'▣ ONE BUTTON PLATFORMER',font:'bold 66px "Courier New",monospace',c:'#ff6060',gap:96},
+    {text:'auto-run  ·  tap to jump',font:'36px "Courier New",monospace',c:'#6688bb',gap:58},
+    {text:'▲ up  ▶▶ gap  ▼ down  ⬇ fall',font:'bold 30px "Courier New",monospace',c:'#8899aa',gap:88},
+    {text:'TAP  to start',font:'bold 54px "Courier New",monospace',c:'#fff',pulse:true},
   ])
 }
 function drawDead() {
   overlay([
-    {text:'YOU FELL',font:'bold 44px "Courier New",monospace',c:'#ff4040',gap:54},
-    {text:'distance  '+String(score).padStart(5,'0'),font:'20px "Courier New",monospace',c:'#fff',gap:34},
-    {text:'best      '+String(best).padStart(5,'0'),font:'16px "Courier New",monospace',c:'#e8c030',gap:52},
-    {text:'SPACE  ·  CLICK  ·  TAP  to retry',font:'bold 17px "Courier New",monospace',c:'#fff',pulse:true},
+    {text:'YOU FELL',font:'bold 96px "Courier New",monospace',c:'#ff4040',gap:118},
+    {text:'dist  '+String(score).padStart(5,'0'),font:'42px "Courier New",monospace',c:'#fff',gap:56},
+    {text:'best  '+String(best).padStart(5,'0'),font:'36px "Courier New",monospace',c:'#e8c030',gap:88},
+    {text:'TAP  to retry',font:'bold 48px "Courier New",monospace',c:'#fff',pulse:true},
   ])
 }
 
 // ── Main loop ─────────────────────────────────────────────────
-function loop() {
+// Gate physics to 60fps regardless of display refresh rate.
+// On 120Hz ProMotion screens rAF fires every ~8ms; without this,
+// speed, gravity and all time-based values run at 2×.
+const FRAME_MS = 1000 / 60
+let lastFrameTime = 0
+
+function loop(ts) {
+  requestAnimationFrame(loop)
+  if (ts - lastFrameTime < FRAME_MS - 1) return
+  lastFrameTime = ts
   update()
+  // Draw everything in logical 800×440 game space; canvas is CW×CH (1/3 res),
+  // so each "game pixel" covers 3×3 canvas pixels → chunky retro look.
+  cx.save()
+  cx.scale(CW/W, CH/H)
   drawBg(); drawZones(); drawPlats(); drawSigns()
   drawParticles()
   if (mode==='play'||mode==='dead') drawPlayer()
   drawHUD()
   if (mode==='title') drawTitle()
   if (mode==='dead')  drawDead()
-  requestAnimationFrame(loop)
+  cx.restore()
 }
 
-init(); loop()
+init(); requestAnimationFrame(loop)
 </script>
 </body>
 </html>
