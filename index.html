@@ -84,14 +84,14 @@ const LOOK_HI     = 520        // look-ahead end offset
 
 // ── Palette per terrain type ─────────────────────────────────
 const COL = {
-  flat:      { b:'#1e4480', s:'#3470c0', t:'#70b0ff', dim:'rgba(52,112,192,0.12)'  },
-  step_up:   { b:'#1e5c1a', s:'#38a030', t:'#80ff60', dim:'rgba(56,160,48,0.12)'   },
-  gap:       { b:'#581890', s:'#9030d0', t:'#cc70ff', dim:'rgba(144,48,208,0.12)'  },
-  step_down: { b:'#6a3c0e', s:'#b06820', t:'#ffb84a', dim:'rgba(176,104,32,0.12)'  },
-  fall:      { b:'#6a0e0e', s:'#b02020', t:'#ff6060', dim:'rgba(176,32,32,0.12)'   },
+  flat:      { b:'#1e4480', s:'#3470c0', t:'#70b0ff' },
+  step_up:   { b:'#1e5c1a', s:'#38a030', t:'#80ff60' },
+  gap:       { b:'#581890', s:'#9030d0', t:'#cc70ff' },
+  descend:   { b:'#6a3c0e', s:'#c07018', t:'#ffb84a' },   // walk/fall descent (no jump)
+  jump_down: { b:'#0a4050', s:'#1888b8', t:'#30d8ff' },   // must jump to reach lower platform
 }
-const SIGN = { flat:null, step_up:'▲ JUMP', gap:'▶▶ JUMP', step_down:'▼ STEP', fall:'⬇ FALL' }
-const NAME = { flat:'FLAT', step_up:'STEP UP', gap:'GAP', step_down:'STEP DOWN', fall:'FALL' }
+const SIGN = { flat:null, step_up:'▲ JUMP', gap:'▶▶ JUMP', descend:'⬇ DROP', jump_down:'↗ JUMP' }
+const NAME = { flat:'FLAT', step_up:'STEP UP', gap:'GAP', descend:'DESCEND', jump_down:'JUMP DOWN' }
 
 // ── Difficulty system ─────────────────────────────────────────
 // All knobs are smooth functions of `score`, using staggered ramp windows
@@ -110,25 +110,54 @@ function ss(x, lo, hi) {          // smoothstep: ease-in/out ramp 0→1
 }
 function lrp(a, b, t) { return a + (b-a)*t }
 
+// Exact RGB lerp for platform color — guarantees all types converge to
+// the identical neutral pixel value at colorFade=1 (no bleed-through).
+const NEUTRAL_B = [100, 125, 175]   // body neutral
+const NEUTRAL_S = [150, 175, 230]   // shine neutral (slightly brighter)
+function hexRgb(h) {
+  const n = parseInt(h.slice(1), 16)
+  return [(n>>16)&255, (n>>8)&255, n&255]
+}
+function lerpCol(a, b, t) {
+  return `rgb(${lrp(a[0],b[0],t)|0},${lrp(a[1],b[1],t)|0},${lrp(a[2],b[2],t)|0})`
+}
+
 function getDiff() {
   const s = score
-  return {
-    speed:     lrp(4,    7.5,  ss(s,   0, 700)),
-    gapLo:     lrp(80,   110,  ss(s, 150, 900)),  // gap min width
-    gapHi:     lrp(110,  195,  ss(s, 150, 900)),  // gap max width
-    stepHi:    lrp(100,  135,  ss(s, 150, 900)),  // step_up max height
-    dropHi:    lrp(130,  190,  ss(s, 150, 900)),  // step_down max drop
-    fallHi:    lrp(200,  330,  ss(s, 150, 900)),  // fall max drop
-    runLo:     lrp(160,   80,  ss(s,  80, 600)),  // run-up min width
-    runHi:     lrp(220,  120,  ss(s,  80, 600)),  // run-up max width
-    flatBias:  Math.round(lrp(3, 0, ss(s, 0, 400))),  // extra 'flat' pool entries
-    colorFade: ss(s, 150, 600),   // 0 = full type colors, 1 = neutral steel
-  }
+
+  // ── Phase 1: Spacing squeeze  (score 0 → 180, speed locked at 4) ──
+  // Flat bias, run-up width, and landing widths tighten while the world
+  // is still colourful. Gaps/drops grow so player learns harder geometry
+  // at slow speed before the colour cues disappear.
+  const p1       = ss(s, 0, 180)
+  const flatBias = Math.round(lrp(3, 0, ss(s, 0, 120)))
+  const runLo    = lrp(180,  45, p1)   // run-up min: 180 → 45  (very little warning)
+  const runHi    = lrp(260,  80, p1)   // run-up max: 260 → 80
+  const landLo   = lrp(190, 120, p1)   // landing min: 190 → 120 (tighter target)
+  const landHi   = lrp(270, 170, p1)   // landing max: 270 → 170
+  const gapLo    = lrp( 70, 130, ss(s, 60, 180))  // gap min: 70 → 130
+  const gapHi    = lrp(110, 180, ss(s, 60, 180))  // gap max: 110 → 180  (reach ≈ 192)
+  const stepHi   = lrp( 90, 130, ss(s, 60, 180))
+  const dropHi   = lrp(110, 170, ss(s, 60, 180))
+  const fallHi   = lrp(180, 280, ss(s, 60, 180))
+
+  // ── Phase 2: Colour fade  (score 180 → 220, ~10 s at speed 4) ──
+  const colorFade = ss(s, 180, 220)
+
+  // ── Phase 3a: First speed ramp  (score 260 → 800) — 4 → 7.5 px/frame ──
+  // ── Phase 3b: Second speed ramp (score 800 → 1400) — 7.5 → 14 px/frame ──
+  // Each ramp is roughly the same ×1.875 factor and similar wall-clock duration.
+  const speed = s < 800
+    ? lrp(4,   7.5, ss(s, 260,  800))
+    : lrp(7.5, 14,  ss(s, 800, 1400))
+
+  return { speed, gapLo, gapHi, stepHi, dropHi, fallHi,
+           runLo, runHi, landLo, landHi, flatBias, colorFade }
 }
 
 // Per-type "successful landing" counters.
 // Label for a type hides permanently once it's been cleared twice.
-const typeClears = { step_up:0, gap:0, step_down:0, fall:0 }
+const typeClears = { step_up:0, gap:0, descend:0, jump_down:0 }
 function showLabel(type) { return (typeClears[type]||0) < 2 }
 
 // ── State ────────────────────────────────────────────────────
@@ -168,17 +197,41 @@ function addP(x,y,w,t) { plats.push({x,y,w,t}) }
 function addS(x,y,t)   { const s=SIGN[t]; if(s) signs.push({x,y,s,t}) }
 function addZ(x,y,w,h,t){ zones.push({x,y,w,h,t}) }
 
+// Simulates exact horizontal travel during a free-fall of `dh` world units,
+// starting from vy=0, using the game's own gravity + MXVY clamp.
+const LAND_MARGIN = 28   // px of platform guaranteed left of landing point
+function fallLand(dh, spd) {
+  let vy=0, y=0, t=0
+  while (y < dh && t < 400) { vy=Math.min(vy+GRAV, MXVY); y+=vy; t++ }
+  return t * spd
+}
+
+// Same but player starts with a full jump impulse (JVY) — how far they reach
+// when jumping from flat ground and landing `dh` units below start.
+function jumpDownLand(dh, spd) {
+  let vy=JVY, y=0, t=0
+  while (y < dh && t < 400) { vy=Math.min(vy+GRAV, MXVY); y+=vy; t++ }
+  return t * spd
+}
+
 // ── World generation ─────────────────────────────────────────
 function gen() {
   const d  = getDiff()
   const rv = d.runLo + (Math.random()*(d.runHi-d.runLo)|0)
 
-  // Pool: more 'flat' early, fades to zero extra by score 400
   const av = ['gap']
   for (let i=0; i<=d.flatBias; i++) av.push('flat')
   if (gy-110 >= YMIN) av.push('step_up')
-  if (gy+90  <= YMAX) { av.push('step_down'); if(d.flatBias>0) av.push('step_down') }
-  if (gy+160 <= YMAX) av.push('fall')
+  // descend: consolidates old step_down + fall (walk/fall, no jump needed)
+  if (gy+70 <= YMAX) { av.push('descend'); if(d.flatBias>0) av.push('descend') }
+  // jump_down: only when total void (gap + landing trim) fits within 570px of
+  // screen so the landing platform is visible before the player needs to jump.
+  // At ~speed 11 this becomes impossible and the type drops out of the pool.
+  if (gy+120 <= YMAX) {
+    const noJ = fallLand(95, d.speed), fullJ = jumpDownLand(95, d.speed)
+    const testGap = noJ + 30
+    if (testGap + Math.max(0, fullJ - testGap - LAND_MARGIN) < 570) av.push('jump_down')
+  }
   const t = av[Math.random()*av.length|0]
 
   switch(t) {
@@ -192,10 +245,9 @@ function gen() {
     case 'step_up': {
       const sh  = 65+(Math.random()*(d.stepHi-65)|0)
       const gap =  8+(Math.random()*14|0)
-      const lw  = 190+(Math.random()*80|0)
+      const lw  = d.landLo+(Math.random()*(d.landHi-d.landLo)|0)
       addP(gx,gy,rv,'step_up')
       addS(gx+12, gy-36,'step_up')
-      addZ(gx+rv, gy-sh, gap, sh, 'step_up')
       gx+=rv+gap; gy=Math.max(gy-sh,YMIN)
       addP(gx,gy,lw,'step_up'); gx+=lw
       break
@@ -203,35 +255,42 @@ function gen() {
 
     case 'gap': {
       const gw = d.gapLo+(Math.random()*(d.gapHi-d.gapLo)|0)
-      const lw = 190+(Math.random()*80|0)
+      const lw = d.landLo+(Math.random()*(d.landHi-d.landLo)|0)
       addP(gx,gy,rv,'gap')
       addS(gx+rv-28, gy-36,'gap')
-      addZ(gx+rv, gy, gw, 800, 'gap')
       gx+=rv+gw; addP(gx,gy,lw,'gap'); gx+=lw
       break
     }
 
-    case 'step_down': {
+    case 'descend': {
+      // Walk or fall off a small gap — no jump required. Full drop range.
       const dh  = 70+(Math.random()*(d.dropHi-70)|0)
-      const gap = 12+(Math.random()*22|0)
-      const lw  = 190+(Math.random()*80|0)
-      addP(gx,gy,rv,'step_down')
-      addS(gx+rv-55, gy-36,'step_down')
-      const prevY=gy; gx+=rv+gap; gy=Math.min(gy+dh,YMAX)
-      addZ(gx-gap, prevY, gap+8, 800,'step_down')
-      addP(gx,gy,lw,'step_down'); gx+=lw
+      const gap =  6+(Math.random()*18|0)
+      const lw  = d.landLo+(Math.random()*(d.landHi-d.landLo)|0)
+      addP(gx,gy,rv,'descend')
+      addS(gx+rv-50, gy-36,'descend')
+      gx+=rv+gap; gy=Math.min(gy+dh,YMAX)
+      const trim = Math.max(0, fallLand(dh, d.speed) - gap - LAND_MARGIN)|0
+      addP(gx+trim, gy, lw, 'descend'); gx+=trim+lw
       break
     }
 
-    case 'fall': {
-      const dh  = 160+(Math.random()*(d.fallHi-160)|0)
-      const gap =   5+(Math.random()*12|0)
-      const lw  = 210+(Math.random()*80|0)
-      addP(gx,gy,rv,'fall')
-      addS(gx+rv-55, gy-36,'fall')
-      addZ(gx+rv, gy, gap+lw+30, dh, 'fall')
-      gx+=rv+gap; gy=Math.min(gy+dh,YMAX)
-      addP(gx,gy,lw,'fall'); gx+=lw
+    case 'jump_down': {
+      // Must jump to clear the gap — landing is lower than the run-up.
+      // Gap is just over free-fall reach so any reasonable jump clears it.
+      // Drop capped at 120px so landing is always visible in the camera frame.
+      const dh      = 70+(Math.random()*50|0)         // 70-120px
+      const noJump  = fallLand(dh, d.speed)
+      const fullJump = jumpDownLand(dh, d.speed)
+      // Gap: 20-55px over the no-jump threshold — requires a jump but forgives timing
+      const gw      = (noJump + 20 + (Math.random()*35|0))|0
+      const lw      = d.landLo+(Math.random()*(d.landHi-d.landLo)|0)
+      addP(gx,gy,rv,'jump_down')
+      addS(gx+rv-44, gy-36,'jump_down')
+      gx+=rv+gw; gy=Math.min(gy+dh,YMAX)
+      // Trim: platform starts where player arrives after full jump
+      const trim = Math.max(0, fullJump - gw - LAND_MARGIN)|0
+      addP(gx+trim, gy, lw, 'jump_down'); gx+=trim+lw
       break
     }
   }
@@ -388,22 +447,19 @@ function drawBg() {
 function drawZones() {}  // removed — zones kept in world state for gen() logic, not drawn
 
 function drawPlats() {
-  const cf = getDiff().colorFade   // 0 = vivid type colors, 1 = uniform neutral
+  const cf = getDiff().colorFade
   for (const p of plats) {
     const sx=p.x-camX|0, sy=p.y-camY|0
     if (sx+p.w<0||sx>W||sy+PTH<-4||sy>H+4) continue
-    const c=COL[p.t]
+    const c   = COL[p.t]
+    const bRgb = hexRgb(c.b)
+    const sRgb = hexRgb(c.s)
 
     cx.fillStyle='rgba(0,0,0,0.32)'; cx.fillRect(sx+4,sy+5,p.w,PTH)  // shadow
 
-    // Draw body and shine in type color, then overlay neutral to fade
-    cx.fillStyle=c.b; cx.fillRect(sx,sy,p.w,PTH)
-    cx.fillStyle=c.s; cx.fillRect(sx,sy,p.w,5)
-    if (cf > 0) {
-      // Neutral steel — bright enough to see against black sky
-      cx.fillStyle=`rgba(100,125,175,${cf*0.90})`; cx.fillRect(sx,sy,p.w,PTH)
-      cx.fillStyle=`rgba(145,170,225,${cf*0.90})`; cx.fillRect(sx,sy,p.w,5)
-    }
+    // Exact lerp → at cf=1 every type converges to the identical neutral pixel
+    cx.fillStyle=lerpCol(bRgb, NEUTRAL_B, cf); cx.fillRect(sx,sy,p.w,PTH)
+    cx.fillStyle=lerpCol(sRgb, NEUTRAL_S, cf); cx.fillRect(sx,sy,p.w,5)
 
     cx.fillStyle='rgba(0,0,0,0.22)'; cx.fillRect(sx,sy+PTH/2|0,p.w,1)
     cx.fillStyle='rgba(0,0,0,0.18)'
@@ -413,7 +469,7 @@ function drawPlats() {
     const dist=Math.abs(sx-200)
     if (dist<300) {
       cx.globalAlpha=Math.max(0,(300-dist)/300)*.10
-      cx.fillStyle=c.s; cx.fillRect(sx,sy,p.w,PTH)
+      cx.fillStyle=lerpCol(sRgb, NEUTRAL_S, cf); cx.fillRect(sx,sy,p.w,PTH)
       cx.globalAlpha=1
     }
   }
@@ -475,7 +531,7 @@ function drawHUD() {
 
   // Speed heat bar — top right
   const d=getDiff()
-  const spd_t=(d.speed-4)/3.5
+  const spd_t=(d.speed-4)/10   // normalized over full range 4→14
   const barW=150, barH=16, bx=W-barW-20, by=18
   cx.fillStyle='rgba(0,0,0,0.50)'; cx.fillRect(bx-3,by-3,barW+6,barH+6)
   const bg=cx.createLinearGradient(bx,0,bx+barW,0)
