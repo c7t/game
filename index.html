@@ -1,0 +1,563 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>One Button Platformer</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box }
+body {
+  background:#04040f;
+  display:flex; flex-direction:column;
+  align-items:center; justify-content:center;
+  height:100vh; overflow:hidden;
+  font-family:'Courier New', monospace;
+}
+canvas { display:block; cursor:pointer; touch-action:none; image-rendering:pixelated }
+#tip { margin-top:10px; color:rgba(255,255,255,0.22); font:12px 'Courier New',monospace; letter-spacing:2px; text-transform:uppercase }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="tip">SPACE · CLICK · TAP</div>
+<script>
+// ═══════════════════════════════════════════════════════════
+//  ONE BUTTON PLATFORMER  —  vertical camera edition
+//
+//  Camera system: asymmetric dead-zone + spring + look-ahead
+//    · Dead zone keeps player in a comfortable band
+//    · Zone is TIGHTER below when falling (fall pulls cam faster)
+//    · Subtle look-ahead bias pre-tilts toward upcoming terrain
+// ═══════════════════════════════════════════════════════════
+
+const cv = document.getElementById('c'), cx = cv.getContext('2d')
+const W = 800, H = 440
+cv.width = W; cv.height = H
+;(function scale(){
+  const s = Math.min(window.innerWidth/W, (window.innerHeight-40)/H)
+  cv.style.width=(W*s)+'px'; cv.style.height=(H*s)+'px'
+})()
+
+// ── Physics ─────────────────────────────────────────────────
+const SPD  = 4        // px/frame auto-run
+const JVY  = -14      // jump impulse (negative = up)
+const GRAV = 0.58     // px/frame²
+const MXVY = 18       // max fall speed
+const PLW  = 24       // player width
+const PLH  = 32       // player height
+const PTH  = 20       // platform thickness
+
+// Physics check:
+//   peak height  ≈ 14²/(2×0.58) ≈ 169 px
+//   air time     ≈ 2×14/0.58   ≈  48 frames
+//   jump reach   ≈ 4×48         ≈ 192 px
+
+// ── World bounds (large—camera follows, not clipped to screen) ─
+const YMIN = -2000
+const YMAX =  4000
+
+// ── Camera config ────────────────────────────────────────────
+// camY = world-Y of the top edge of the screen
+// screenY = worldY - camY
+
+// Dead zone in screen coords (player CENTER must stay inside)
+// Asymmetric: tighter below when falling so landing zone appears faster
+const DZ_TOP      = H * 0.26   // upper boundary
+const DZ_BOT_IDLE = H * 0.60   // lower boundary (ground/rising)
+const DZ_BOT_FALL = H * 0.45   // lower boundary (falling fast—tighter!)
+const CAM_SPRING  = 0.060      // spring constant
+const CAM_DAMP    = 0.82       // velocity damping per frame
+const LOOK_STR    = 0.0055     // terrain look-ahead influence strength
+const LOOK_LO     = 80         // look-ahead start offset (px ahead of player)
+const LOOK_HI     = 520        // look-ahead end offset
+
+// ── Palette per terrain type ─────────────────────────────────
+const COL = {
+  flat:      { b:'#1e4480', s:'#3470c0', t:'#70b0ff', dim:'rgba(52,112,192,0.12)'  },
+  step_up:   { b:'#1e5c1a', s:'#38a030', t:'#80ff60', dim:'rgba(56,160,48,0.12)'   },
+  gap:       { b:'#581890', s:'#9030d0', t:'#cc70ff', dim:'rgba(144,48,208,0.12)'  },
+  step_down: { b:'#6a3c0e', s:'#b06820', t:'#ffb84a', dim:'rgba(176,104,32,0.12)'  },
+  fall:      { b:'#6a0e0e', s:'#b02020', t:'#ff6060', dim:'rgba(176,32,32,0.12)'   },
+}
+const SIGN = { flat:null, step_up:'▲ JUMP', gap:'▶▶ JUMP', step_down:'▼ STEP', fall:'⬇ FALL' }
+const NAME = { flat:'FLAT', step_up:'STEP UP', gap:'GAP', step_down:'STEP DOWN', fall:'FALL' }
+
+// ── Difficulty system ─────────────────────────────────────────
+// All knobs are smooth functions of `score`, using staggered ramp windows
+// so changes never pile up simultaneously.
+//
+//  score    0 → 400   flat bias fades (breathing room disappears)
+//  score    0 → 700   speed ramps  4 → 7.5 px/frame
+//  score   80 → 600   run-up width shrinks (less warning)
+//  score  150 → 600   type colors fade to neutral (no visual telegraph)
+//  score  150 → 900   gap / step / fall sizes grow
+//  labels             per-type: hidden after 2 successful landings each
+
+function ss(x, lo, hi) {          // smoothstep: ease-in/out ramp 0→1
+  const t = Math.max(0, Math.min(1, (x-lo)/(hi-lo)))
+  return t*t*(3-2*t)
+}
+function lrp(a, b, t) { return a + (b-a)*t }
+
+function getDiff() {
+  const s = score
+  return {
+    speed:     lrp(4,    7.5,  ss(s,   0, 700)),
+    gapLo:     lrp(80,   110,  ss(s, 150, 900)),  // gap min width
+    gapHi:     lrp(110,  195,  ss(s, 150, 900)),  // gap max width
+    stepHi:    lrp(100,  135,  ss(s, 150, 900)),  // step_up max height
+    dropHi:    lrp(130,  190,  ss(s, 150, 900)),  // step_down max drop
+    fallHi:    lrp(200,  330,  ss(s, 150, 900)),  // fall max drop
+    runLo:     lrp(160,   80,  ss(s,  80, 600)),  // run-up min width
+    runHi:     lrp(220,  120,  ss(s,  80, 600)),  // run-up max width
+    flatBias:  Math.round(lrp(3, 0, ss(s, 0, 400))),  // extra 'flat' pool entries
+    colorFade: ss(s, 150, 600),   // 0 = full type colors, 1 = neutral steel
+  }
+}
+
+// Per-type "successful landing" counters.
+// Label for a type hides permanently once it's been cleared twice.
+const typeClears = { step_up:0, gap:0, step_down:0, fall:0 }
+function showLabel(type) { return (typeClears[type]||0) < 2 }
+
+// ── State ────────────────────────────────────────────────────
+let plats=[], signs=[], zones=[], particles=[]
+let camX=0, camY=0, camYVel=0
+let gx=0, gy=0
+let pl={}, score=0, best=0
+let coyote=0, jbuf=0
+let tick=0, mode='title', lastType='flat'
+let lastGroundY=0   // world-Y of last surface the player stood on
+
+// ── Init ─────────────────────────────────────────────────────
+function init() {
+  plats=[]; signs=[]; zones=[]; particles=[]
+  tick=0; score=0; gx=0; camX=0; lastType='flat'
+  Object.keys(typeClears).forEach(k => typeClears[k]=0)
+  gy = 260   // starting world-Y for ground
+
+  addP(0, gy, 460, 'flat')
+  gx = 460
+
+  pl = { wx:200, y:gy-PLH, vy:0, on:true }
+  lastGroundY = gy   // track last known ground surface
+
+  // Position camera so player starts at 38% from top
+  camY    = pl.y + PLH/2 - H*0.38
+  camYVel = 0
+  coyote=0; jbuf=0
+
+  while (gx-camX < W*4) gen()
+}
+
+function addP(x,y,w,t) { plats.push({x,y,w,t}) }
+function addS(x,y,t)   { const s=SIGN[t]; if(s) signs.push({x,y,s,t}) }
+function addZ(x,y,w,h,t){ zones.push({x,y,w,h,t}) }
+
+// ── World generation ─────────────────────────────────────────
+function gen() {
+  const d  = getDiff()
+  const rv = d.runLo + (Math.random()*(d.runHi-d.runLo)|0)
+
+  // Pool: more 'flat' early, fades to zero extra by score 400
+  const av = ['gap']
+  for (let i=0; i<=d.flatBias; i++) av.push('flat')
+  if (gy-110 >= YMIN) av.push('step_up')
+  if (gy+90  <= YMAX) { av.push('step_down'); if(d.flatBias>0) av.push('step_down') }
+  if (gy+160 <= YMAX) av.push('fall')
+  const t = av[Math.random()*av.length|0]
+
+  switch(t) {
+
+    case 'flat': {
+      const w = 200+(Math.random()*120|0)
+      addP(gx,gy,w,'flat'); gx+=w
+      break
+    }
+
+    case 'step_up': {
+      const sh  = 65+(Math.random()*(d.stepHi-65)|0)
+      const gap =  8+(Math.random()*14|0)
+      const lw  = 190+(Math.random()*80|0)
+      addP(gx,gy,rv,'step_up')
+      addS(gx+12, gy-36,'step_up')
+      addZ(gx+rv, gy-sh, gap, sh, 'step_up')
+      gx+=rv+gap; gy=Math.max(gy-sh,YMIN)
+      addP(gx,gy,lw,'step_up'); gx+=lw
+      break
+    }
+
+    case 'gap': {
+      const gw = d.gapLo+(Math.random()*(d.gapHi-d.gapLo)|0)
+      const lw = 190+(Math.random()*80|0)
+      addP(gx,gy,rv,'gap')
+      addS(gx+rv-28, gy-36,'gap')
+      addZ(gx+rv, gy, gw, 800, 'gap')
+      gx+=rv+gw; addP(gx,gy,lw,'gap'); gx+=lw
+      break
+    }
+
+    case 'step_down': {
+      const dh  = 70+(Math.random()*(d.dropHi-70)|0)
+      const gap = 12+(Math.random()*22|0)
+      const lw  = 190+(Math.random()*80|0)
+      addP(gx,gy,rv,'step_down')
+      addS(gx+rv-55, gy-36,'step_down')
+      const prevY=gy; gx+=rv+gap; gy=Math.min(gy+dh,YMAX)
+      addZ(gx-gap, prevY, gap+8, 800,'step_down')
+      addP(gx,gy,lw,'step_down'); gx+=lw
+      break
+    }
+
+    case 'fall': {
+      const dh  = 160+(Math.random()*(d.fallHi-160)|0)
+      const gap =   5+(Math.random()*12|0)
+      const lw  = 210+(Math.random()*80|0)
+      addP(gx,gy,rv,'fall')
+      addS(gx+rv-55, gy-36,'fall')
+      addZ(gx+rv, gy, gap+lw+30, dh, 'fall')
+      gx+=rv+gap; gy=Math.min(gy+dh,YMAX)
+      addP(gx,gy,lw,'fall'); gx+=lw
+      break
+    }
+  }
+}
+
+// ── Camera ───────────────────────────────────────────────────
+function updateCamera() {
+  const centerSY = (pl.y + PLH/2) - camY   // player center in screen coords
+
+  // Dead zone: asymmetric depending on fall state
+  const isFalling = pl.vy > 3
+  const dzBot = isFalling ? DZ_BOT_FALL : DZ_BOT_IDLE
+
+  let force = 0
+
+  if (centerSY < DZ_TOP) {
+    // Player above dead zone — camera moves up
+    force += (centerSY - DZ_TOP) * CAM_SPRING
+  } else if (centerSY > dzBot) {
+    // Player below dead zone — camera moves down
+    force += (centerSY - dzBot) * CAM_SPRING
+    // Extra urgency when actively falling — reveal landing zone
+    if (isFalling) force += (centerSY - dzBot) * CAM_SPRING * 0.55
+  }
+
+  // Terrain look-ahead: gently pre-tilt toward upcoming platform height
+  let tSum=0, tCnt=0
+  for (const p of plats) {
+    if (p.x > pl.wx+LOOK_LO && p.x < pl.wx+LOOK_HI) {
+      tSum += p.y + PTH/2; tCnt++
+    }
+  }
+  if (tCnt > 0) {
+    const avgTY    = tSum/tCnt            // world-Y of upcoming terrain
+    const tScreenY = avgTY - camY         // its current screen-Y
+    const idealSY  = H * 0.68            // we'd like it in lower third
+    force += (tScreenY - idealSY) * LOOK_STR
+  }
+
+  camYVel += force
+  camYVel *= CAM_DAMP
+  camY    += camYVel
+}
+
+// ── Input ─────────────────────────────────────────────────────
+function doJump() {
+  if (pl.on || coyote>0) {
+    pl.vy=JVY; pl.on=false; coyote=0; jbuf=0; spawnJumpPfx()
+  } else {
+    jbuf=6
+  }
+}
+function act() {
+  if (mode==='title')  { mode='play'; return }
+  if (mode==='dead')   { init(); mode='play'; return }
+  doJump()
+}
+document.addEventListener('keydown', e=>{
+  if (['Space','ArrowUp','KeyW'].includes(e.code)) { e.preventDefault(); act() }
+})
+cv.addEventListener('pointerdown', e=>{ e.preventDefault(); act() })
+
+// ── Particles ─────────────────────────────────────────────────
+function spawnJumpPfx() {
+  for (let i=0;i<8;i++) {
+    const a=Math.PI+Math.random()*Math.PI, v=1.5+Math.random()*2.5
+    particles.push({x:pl.wx+PLW/2, y:pl.y+PLH,
+      vx:Math.cos(a)*v, vy:Math.sin(a)*v-.5, life:22, max:22, r:3, col:'rgba(255,180,80,'})
+  }
+}
+function spawnDeathPfx() {
+  for (let i=0;i<22;i++) {
+    const a=Math.random()*Math.PI*2, v=1+Math.random()*4
+    particles.push({x:pl.wx+PLW/2, y:pl.y+PLH/2,
+      vx:Math.cos(a)*v, vy:Math.sin(a)*v-2, life:45, max:45, r:5, col:'rgba(255,80,80,'})
+  }
+}
+
+// ── Update ────────────────────────────────────────────────────
+function update() {
+  if (mode!=='play') return
+  tick++
+
+  const spd = getDiff().speed
+  pl.wx += spd
+  camX   = pl.wx-200
+
+  pl.vy  = Math.min(pl.vy+GRAV, MXVY)
+  pl.y  += pl.vy
+
+  const was = pl.on; pl.on=false
+  for (const p of plats) {
+    const sx=p.x-camX
+    if (sx+p.w<200 || sx>200+PLW) continue
+    const prev=pl.y+PLH-pl.vy
+    if (prev<=p.y+1 && pl.y+PLH>=p.y && pl.vy>=0) {
+      pl.y=p.y-PLH; pl.vy=0; pl.on=true; lastType=p.t
+      lastGroundY = p.y
+    }
+  }
+
+  // Count successful landings per type (airborne → landed on non-flat)
+  if (!was && pl.on && lastType !== 'flat') {
+    typeClears[lastType] = (typeClears[lastType]||0) + 1
+  }
+
+  if (was&&!pl.on)     coyote=7
+  else if (pl.on)      coyote=0
+  else if (coyote>0)   coyote--
+
+  if (jbuf>0) { jbuf--; if(pl.on||coyote>0) doJump() }
+
+  updateCamera()
+
+  score=pl.wx/60|0; if(score>best) best=score
+
+  // Death: fell too far below the last platform (350px clears max fall segment of 300px,
+  // but triggers almost immediately if the player misses the landing platform)
+  if (pl.y - lastGroundY > 350) { spawnDeathPfx(); mode='dead'; return }
+
+  particles.forEach(p=>{ p.x+=p.vx; p.y+=p.vy; p.vy+=.15; p.life-- })
+  particles=particles.filter(p=>p.life>0)
+
+  while (gx-camX < W*3) gen()
+  const cut=camX-400
+  plats = plats.filter(p=>p.x+p.w>cut)
+  signs = signs.filter(s=>s.x>cut)
+  zones = zones.filter(z=>z.x+z.w>cut && z.y+z.h>camY-200)
+}
+
+// ── Draw ──────────────────────────────────────────────────────
+function drawBg() {
+  // Sky darkens and very slightly reddens with difficulty
+  const heat = getDiff().colorFade * 0.08
+  const g=cx.createLinearGradient(0,0,0,H)
+  g.addColorStop(0, `rgb(${4+heat*30|0},4,${15+heat*4|0})`)
+  g.addColorStop(1, `rgb(${8+heat*20|0},8,${32+heat*4|0})`)
+  cx.fillStyle=g; cx.fillRect(0,0,W,H)
+
+  // Stars with both horizontal AND vertical parallax
+  for (let layer=0;layer<3;layer++) {
+    const hs=0.05+layer*0.07, vs=0.03+layer*0.05
+    const hoff=(camX*hs)|0, voff=(camY*vs)|0
+    cx.fillStyle=`rgba(255,255,255,${.30+layer*.15})`
+    const n=30+layer*25
+    for (let i=0;i<n;i++) {
+      const sx=((i*(997+layer*333)+hoff)%W+W)%W
+      const sy=((i*(421+layer*211)+i*7+voff)%H+H)%H
+      cx.fillRect(sx,sy,layer===2&&i%7===0?2:1,layer===2&&i%7===0?2:1)
+    }
+  }
+}
+
+function drawZones() {
+  for (const z of zones) {
+    const sx=z.x-camX|0, sy=z.y-camY|0
+    if (sx+z.w<0||sx>W||sy>H||sy+z.h<0) continue
+    const c=COL[z.t], dy=Math.min(z.h,120)
+    const g=cx.createLinearGradient(0,sy,0,sy+dy)
+    g.addColorStop(0,c.dim.replace('0.12','0.28'))
+    g.addColorStop(1,c.dim.replace('0.12','0.02'))
+    cx.fillStyle=g; cx.fillRect(sx,sy,z.w,z.h)
+  }
+}
+
+function drawPlats() {
+  const cf = getDiff().colorFade   // 0 = vivid type colors, 1 = uniform neutral
+  for (const p of plats) {
+    const sx=p.x-camX|0, sy=p.y-camY|0
+    if (sx+p.w<0||sx>W||sy+PTH<-4||sy>H+4) continue
+    const c=COL[p.t]
+
+    cx.fillStyle='rgba(0,0,0,0.32)'; cx.fillRect(sx+4,sy+5,p.w,PTH)  // shadow
+
+    // Draw body and shine in type color, then overlay neutral to fade
+    cx.fillStyle=c.b; cx.fillRect(sx,sy,p.w,PTH)
+    cx.fillStyle=c.s; cx.fillRect(sx,sy,p.w,5)
+    if (cf > 0) {
+      // Neutral steel: fades type color away
+      cx.fillStyle=`rgba(22,34,58,${cf*0.92})`; cx.fillRect(sx,sy,p.w,PTH)
+      cx.fillStyle=`rgba(34,52,88,${cf*0.92})`; cx.fillRect(sx,sy,p.w,5)
+    }
+
+    cx.fillStyle='rgba(0,0,0,0.22)'; cx.fillRect(sx,sy+PTH/2|0,p.w,1)
+    cx.fillStyle='rgba(0,0,0,0.18)'
+    const bw=30
+    for (let bx=sx%bw;bx<p.w;bx+=bw) cx.fillRect(sx+bx,sy+5,1,PTH-5)
+    for (let bx=(sx+bw/2)%bw;bx<p.w;bx+=bw) cx.fillRect(sx+bx,sy+5,1,PTH/2-5|0)
+    const dist=Math.abs(sx-200)
+    if (dist<300) {
+      cx.globalAlpha=Math.max(0,(300-dist)/300)*.10
+      cx.fillStyle=c.s; cx.fillRect(sx,sy,p.w,PTH)
+      cx.globalAlpha=1
+    }
+  }
+}
+
+function drawSigns() {
+  cx.font='bold 11px "Courier New",monospace'
+  for (const s of signs) {
+    if (!showLabel(s.t)) continue                              // hidden once cleared twice
+    const sx=s.x-camX|0, sy=s.y-camY|0
+    if (sx<-80||sx>W+80||sy<-30||sy>H+10) continue
+    const c=COL[s.t]
+    // Fade label alpha with color fade (labels become less readable as world decolors)
+    const a = 1 - getDiff().colorFade * 0.5
+    const tw=cx.measureText(s.s).width+10
+    cx.globalAlpha=a
+    cx.fillStyle='rgba(0,0,0,0.55)'; cx.fillRect(sx-2,sy-13,tw,16)
+    cx.fillStyle=c.t; cx.fillText(s.s,sx+3,sy)
+    cx.globalAlpha=1
+  }
+}
+
+function drawParticles() {
+  for (const p of particles) {
+    const sx=p.x-camX, sy=p.y-camY, a=p.life/p.max, r=p.r*a
+    cx.fillStyle=p.col+a+')'
+    cx.fillRect(sx-r,sy-r,r*2,r*2)
+  }
+}
+
+function drawPlayer() {
+  const sx=200, sy=(pl.y-camY)|0, air=!pl.on
+  cx.fillStyle='rgba(0,0,0,0.22)'; cx.fillRect(sx+4,sy+PLH+1,PLW-2,4)
+  cx.fillStyle=air?'#ff7060':'#e84848'; cx.fillRect(sx,sy,PLW,PLH)
+  cx.fillStyle='rgba(255,255,255,0.22)'; cx.fillRect(sx,sy,4,PLH)
+  cx.fillStyle='rgba(255,255,255,0.28)'; cx.fillRect(sx,sy,PLW,5)
+  cx.fillStyle='#0c0618'; cx.fillRect(sx+11,sy+7,10,10)
+  cx.fillStyle='#fff';    cx.fillRect(sx+13,sy+9,6,6)
+  cx.fillStyle='#0a0514'; cx.fillRect(sx+16+(air?1:0),sy+11,2,3)
+  cx.fillStyle='#b03030'
+  if (pl.on) {
+    const lk=Math.sin(tick*.38)*5|0
+    cx.fillRect(sx+3,sy+PLH,8,8+lk); cx.fillRect(sx+PLW-11,sy+PLH,8,8-lk)
+  } else {
+    cx.fillRect(sx+3,sy+PLH,8,5); cx.fillRect(sx+PLW-11,sy+PLH,8,5)
+  }
+  cx.strokeStyle='rgba(0,0,0,0.5)'; cx.lineWidth=1
+  cx.strokeRect(sx+.5,sy+.5,PLW-1,PLH-1)
+}
+
+// ── Camera debug strip ────────────────────────────────────────
+function drawCamStrip() {
+  if (mode!=='play') return
+  // Thin vertical strip on right edge showing dead zone + player position
+  const ix=W-18, iy=16, iw=10, ih=H-32
+  cx.fillStyle='rgba(0,0,0,0.50)'; cx.fillRect(ix-2,iy-2,iw+4,ih+4)
+  // dead zone band
+  const dzT=DZ_TOP/H*ih, dzB=DZ_BOT_IDLE/H*ih, dzBf=DZ_BOT_FALL/H*ih
+  cx.fillStyle='rgba(80,255,80,0.10)';  cx.fillRect(ix,iy+dzT,iw,dzB-dzT)
+  cx.fillStyle='rgba(255,160,40,0.12)'; cx.fillRect(ix,iy+dzB,iw,dzBf-dzB)  // tighter fall zone
+  // player indicator
+  const cSY=(pl.y+PLH/2)-camY
+  const py=iy+Math.min(Math.max(cSY/H,0),1)*ih
+  cx.fillStyle=pl.on?'#80ff60':(coyote>0?'#ffc040':'#ff5050')
+  cx.fillRect(ix,py-2,iw,4)
+  // velocity arrow
+  if (Math.abs(camYVel)>0.3) {
+    cx.fillStyle=camYVel>0?'rgba(255,100,100,0.6)':'rgba(100,200,255,0.6)'
+    const arLen=Math.min(Math.abs(camYVel)*3,12)
+    cx.fillRect(ix+2,py+(camYVel>0?2:(-2-arLen)),6,arLen)
+  }
+}
+
+function drawHUD() {
+  if (mode!=='play') return
+  const tName=NAME[lastType]||''
+  if (tName&&tName!=='FLAT') {
+    const c=COL[lastType]
+    cx.font='bold 10px "Courier New",monospace'
+    const tw=cx.measureText('◉ '+tName).width+14
+    cx.fillStyle='rgba(0,0,0,0.55)'; cx.fillRect(12,H-28,tw,18)
+    cx.fillStyle=c.t; cx.fillText('◉ '+tName,18,H-14)
+  }
+  cx.font='bold 15px "Courier New",monospace'
+  cx.fillStyle='rgba(255,255,255,0.88)'; cx.fillText('DIST  '+String(score).padStart(5,'0'),14,26)
+  if (best>0) { cx.fillStyle='#e8c030'; cx.fillText('BEST  '+String(best).padStart(5,'0'),14,46) }
+
+  // Difficulty phase strip — a small heat bar top-right
+  // Shows speed visually: filled = fast, color shifts warm with danger
+  const d = getDiff()
+  const spd_t = (d.speed - 4) / 3.5        // 0..1 across speed range
+  const barW = 60, barH = 6
+  const bx = W - barW - 14, by = 14
+  cx.fillStyle='rgba(0,0,0,0.45)'; cx.fillRect(bx-2, by-2, barW+4, barH+4)
+  // Gradient: green (slow) → yellow → red (fast)
+  const bg=cx.createLinearGradient(bx,0,bx+barW,0)
+  bg.addColorStop(0,'#30c040'); bg.addColorStop(0.5,'#d0c020'); bg.addColorStop(1,'#e03030')
+  cx.fillStyle=bg; cx.fillRect(bx, by, barW*spd_t, barH)
+  cx.strokeStyle='rgba(255,255,255,0.18)'; cx.lineWidth=1
+  cx.strokeRect(bx-0.5, by-0.5, barW+1, barH+1)
+
+  drawCamStrip()
+}
+
+function overlay(rows) {
+  cx.fillStyle='rgba(3,3,14,0.88)'; cx.fillRect(0,0,W,H)
+  cx.strokeStyle='rgba(255,255,255,0.05)'; cx.lineWidth=1
+  for (let y=0;y<H;y+=18){ cx.beginPath();cx.moveTo(0,y);cx.lineTo(W,y);cx.stroke() }
+  let y=H/2-rows.reduce((a,r)=>a+(r.gap||36),0)/2
+  cx.textAlign='center'
+  for (const r of rows) {
+    cx.font=r.font||'16px "Courier New",monospace'; cx.fillStyle=r.c||'#fff'
+    if(r.pulse) cx.globalAlpha=.6+.4*Math.sin(Date.now()/380)
+    cx.fillText(r.text,W/2,y); cx.globalAlpha=1; y+=r.gap||36
+  }
+  cx.textAlign='left'
+}
+
+function drawTitle() {
+  overlay([
+    {text:'▣ ONE BUTTON PLATFORMER',font:'bold 30px "Courier New",monospace',c:'#ff6060',gap:50},
+    {text:'auto-run  ·  one button to jump',font:'14px "Courier New",monospace',c:'#6688bb',gap:36},
+    {text:'▲ step up   ▶▶ gap   ▼ step down   ⬇ fall   — flat',font:'bold 12px "Courier New",monospace',c:'#8899aa',gap:48},
+    {text:'SPACE  ·  CLICK  ·  TAP  to start',font:'bold 18px "Courier New",monospace',c:'#fff',pulse:true},
+  ])
+}
+function drawDead() {
+  overlay([
+    {text:'YOU FELL',font:'bold 44px "Courier New",monospace',c:'#ff4040',gap:54},
+    {text:'distance  '+String(score).padStart(5,'0'),font:'20px "Courier New",monospace',c:'#fff',gap:34},
+    {text:'best      '+String(best).padStart(5,'0'),font:'16px "Courier New",monospace',c:'#e8c030',gap:52},
+    {text:'SPACE  ·  CLICK  ·  TAP  to retry',font:'bold 17px "Courier New",monospace',c:'#fff',pulse:true},
+  ])
+}
+
+// ── Main loop ─────────────────────────────────────────────────
+function loop() {
+  update()
+  drawBg(); drawZones(); drawPlats(); drawSigns()
+  drawParticles()
+  if (mode==='play'||mode==='dead') drawPlayer()
+  drawHUD()
+  if (mode==='title') drawTitle()
+  if (mode==='dead')  drawDead()
+  requestAnimationFrame(loop)
+}
+
+init(); loop()
+</script>
+</body>
+</html>
