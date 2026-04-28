@@ -164,7 +164,7 @@ function showLabel(type) { return (typeClears[type]||0) < 2 }
 let plats=[], signs=[], zones=[], particles=[]
 let camX=0, camY=0, camYVel=0
 let gx=0, gy=0
-let pl={}, score=0, best=0
+let pl={}, score=0, scoreBase=0, best=0
 let coyote=0, jbuf=0
 let tick=0, mode='title', lastType='flat'
 let lastGroundY=0   // world-Y of last surface the player stood on
@@ -175,7 +175,8 @@ function init() {
   tick=0; score=0; gx=0; camX=0; lastType='flat'
   // ?score=N or ?diff=N lets you start at a higher difficulty for tuning
   const urlScore = parseInt(new URLSearchParams(location.search).get('score') ?? new URLSearchParams(location.search).get('diff') ?? '0')
-  if (urlScore > 0) score = urlScore
+  scoreBase = urlScore > 0 ? urlScore : 0
+  score = scoreBase
   Object.keys(typeClears).forEach(k => typeClears[k]=0)
   gy = 260   // starting world-Y for ground
 
@@ -405,7 +406,8 @@ function update() {
 
   updateCamera()
 
-  score=pl.wx/60|0; if(score>best) best=score
+  score = scoreBase + (pl.wx/60|0)
+  if (score > best) best = score
 
   // Death: fell too far below the last platform (350px clears max fall segment of 300px,
   // but triggers almost immediately if the player misses the landing platform)
