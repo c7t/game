@@ -299,7 +299,7 @@ function gen() {
 
 // ── Camera ───────────────────────────────────────────────────
 function updateCamera() {
-  const centerSY = (pl.y + PLH/2) - camY   // player center in screen coords
+  const centerSY = Math.round((pl.y + PLH/2) - camY)   // player center in screen coords
 
   // Dead zone: asymmetric depending on fall state
   const isFalling = pl.vy > 3
@@ -451,7 +451,7 @@ function drawZones() {}  // removed — zones kept in world state for gen() logi
 function drawPlats() {
   const cf = getDiff().colorFade
   for (const p of plats) {
-    const sx=p.x-camX|0, sy=p.y-camY|0
+    const sx=p.x-camX|0, sy=Math.round(p.y-camY|0)
     if (sx+p.w<0||sx>W||sy+PTH<-4||sy>H+4) continue
     const c   = COL[p.t]
     const bRgb = hexRgb(c.b)
@@ -527,7 +527,7 @@ function drawHUD() {
   if (mode!=='play') return
 
   // Score / best — 3x font size
-  cx.font='bold 22px "Courier New",monospace'
+  cx.font='bold 32px "Courier New",monospace'
   cx.fillStyle='rgba(255,255,255,0.90)'; cx.fillText('DIST '+String(score).padStart(5,'0'),14,28)
   if (best>0) { cx.fillStyle='#e8c030'; cx.fillText('BEST '+String(best).padStart(5,'0'),14,54) }
 
@@ -557,7 +557,7 @@ function overlay(rows) {
 
 function drawTitle() {
   overlay([
-    {text:'▣ ONE BUTTON PLATFORMER',font:'bold 66px "Courier New",monospace',c:'#ff6060',gap:96},
+    {text:'▣ ONE BUTTON PLATFORMER',font:'bold 50px "Courier New",monospace',c:'#ff6060',gap:96},
     {text:'auto-run  ·  tap to jump',font:'36px "Courier New",monospace',c:'#6688bb',gap:58},
     {text:'▲ up  ▶▶ gap  ▼ down  ⬇ fall',font:'bold 30px "Courier New",monospace',c:'#8899aa',gap:88},
     {text:'TAP  to start',font:'bold 54px "Courier New",monospace',c:'#fff',pulse:true},
@@ -565,7 +565,7 @@ function drawTitle() {
 }
 function drawDead() {
   overlay([
-    {text:'YOU FELL',font:'bold 96px "Courier New",monospace',c:'#ff4040',gap:118},
+    {text:'YOU FELL',font:'bold 72px "Courier New",monospace',c:'#ff4040',gap:50},
     {text:'dist  '+String(score).padStart(5,'0'),font:'42px "Courier New",monospace',c:'#fff',gap:56},
     {text:'best  '+String(best).padStart(5,'0'),font:'36px "Courier New",monospace',c:'#e8c030',gap:88},
     {text:'TAP  to retry',font:'bold 48px "Courier New",monospace',c:'#fff',pulse:true},
